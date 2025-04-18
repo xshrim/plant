@@ -4,15 +4,17 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
+	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -62,31 +64,73 @@ const html = `
       /* 标题居中 */
     }
 
-    .card-container {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      /* 卡片水平居中 */
-      gap: 20px;
-      padding: 20px;
-      /* 给卡片容器加一些内边距 */
+		.func-container {
+			width: 70%;
+		  display: flex;          /* 关键：启用 Flexbox 布局 */
+      padding: 5px;          /* 容器内边距 */
+      gap: 20px;              /* 关键：设置子元素之间的间隙 (代替 margin) */
+			margin: auto;
+		}
+
+    .search-container {
+			/*flex: 1;*/
+      position: relative;
+      width: 80%;
+      /* 文本框的宽度占容器的 80% */
+      margin: auto;
+      /* 上下边距为20px水平居中 */
+      height: 35px;
+      border-radius: 20px;
+      border: 2px solid #c8e6c9;
+      /* 圆角 */
+      background-color: #f0f8e6;
+      overflow: hidden;
+      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    .search-container input[type="text"] {
+      width: 100%;
+      height: 100%;
+      border: none;
+      outline: none;
+      padding: 0 40px 0 15px;
+      font-size: 16px;
+      box-sizing: border-box;
+    }
+
+    .search-container input[type="text"]:focus {
+      border-color: #4caf50;
+    }
+
+    .search-container .search-icon {
+      position: absolute;
+      right: 15px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 18px;
+      cursor: pointer;
+      color: #888;
+    }
+
+		.card-container {
+      position: relative;
+      width: 90%;
+      max-width: 1200px;
+      margin: 10px auto;
+      /* 高度由JS动态设置 */
     }
 
     .card {
-      width: 300px;
-      border: 1px solid #c8e6c9;
-      /* 卡片边框颜色 (浅绿) */
-      border-radius: 10px;
-      /* 圆角 */
-      overflow: hidden;
-      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-      /* 阴影 */
+      position: absolute;
+      width: 300px;      /* 卡片的固定宽度 */
       background-color: #fff;
-      /* 卡片背景色 (白色) */
-      transition: transform 0.3s ease;
-      margin-bottom: 20px;
-      position: relative;
-      /*  为新增按钮定位 */
+      border-radius: 8px;
+			border: 1px solid #c8e6c9;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+      overflow: hidden;  /* 隐藏超出部分 */
+      margin-bottom: 15px; /* 用于JS计算间隙 */
+      transition: top 0.3s ease, left 0.3s ease;
+      box-sizing: border-box;
     }
 
     .card:hover {
@@ -95,19 +139,20 @@ const html = `
     }
 
     .card-image {
-      width: 100%;
-      /* 图片宽度 */
-      height: 200px;
-      /* 固定图片高度 */
-      object-fit: contain;
-      /* 保持图片比例，可能裁剪 */
       display: block;
-      /* 移除图片下方多余的空白 */
+      width: 100%;       /* 图片宽度撑满卡片 */
+      height: 200px;     /* !!! 固定图片高度 !!! */
+      object-fit: cover; /* !!! 保持宽高比，覆盖区域，可能裁剪 !!! */
+			object-fit: contain;/* 保持图片比例，可能裁剪 */
+      /*background-color: #eee;*/ /* 图片加载时的占位背景色 */
 			margin-top: 10px;
     }
 
     .card-content {
       padding: 15px;
+			margin: 0;
+			/*color: #555;*/
+			line-height: 1.4;
     }
 
     .card-title {
@@ -145,13 +190,32 @@ const html = `
       /* 图标颜色 (深绿) */
     }
 
-    .icon-container::before {
+    .icon-left::before {
       content: attr(data-tooltip);
       position: absolute;
       bottom: -20px;
       left: 50%;
 			pointer-events: none;
-      transform: translateX(-50%);
+      /*transform: translateX(-50%);*/
+      background-color: rgba(0, 0, 0, 0.8);
+      color: #fff;
+      padding: 5px 10px;
+      border-radius: 4px;
+      font-size: 0.8em;
+      white-space: nowrap;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.3s ease, visibility 0.3s ease;
+      z-index: 1;
+    }
+
+		.icon-right::before {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: -20px;
+      right: 50%;
+			pointer-events: none;
+      /*transform: translateX(-50%);*/
       background-color: rgba(0, 0, 0, 0.8);
       color: #fff;
       padding: 5px 10px;
@@ -288,45 +352,6 @@ const html = `
       color: black;
       text-decoration: none;
       cursor: pointer;
-    }
-
-    .search-container {
-      position: relative;
-      width: 80%;
-      /* 文本框的宽度占容器的 80% */
-      margin: 20px auto;
-      /* 上下边距为20px水平居中 */
-      height: 35px;
-      border-radius: 20px;
-      border: 2px solid #c8e6c9;
-      /* 圆角 */
-      background-color: #f0f8e6;
-      overflow: hidden;
-      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
-    }
-
-    .search-container input[type="text"] {
-      width: 100%;
-      height: 100%;
-      border: none;
-      outline: none;
-      padding: 0 40px 0 15px;
-      font-size: 16px;
-      box-sizing: border-box;
-    }
-
-    .search-container input[type="text"]:focus {
-      border-color: #4caf50;
-    }
-
-    .search-container .search-icon {
-      position: absolute;
-      right: 15px;
-      top: 50%;
-      transform: translateY(-50%);
-      font-size: 18px;
-      cursor: pointer;
-      color: #888;
     }
 
     .image-selection {
@@ -470,6 +495,15 @@ const html = `
         /* 小屏幕上卡片占90%宽度 */
       }
 
+			.func-container {
+				width: 90%;
+		  	display: flex;          /* 关键：启用 Flexbox 布局 */
+      	padding: 5px;          /* 容器内边距 */
+      	gap: 5px;              /* 关键：设置子元素之间的间隙 (代替 margin) */
+				margin: auto;
+        flex-direction: column; /* 将主轴方向改为垂直 */
+      }
+
 			.oneline-container .item {
         flex: 1 1 100%; /* 在小屏幕上每个项目占据100%的宽度，实现垂直排列 */
         margin-right: 0;
@@ -481,13 +515,17 @@ const html = `
 <body>
 
   <h1>植物卡片</h1>
-  <div id="response"></div>
   <!-- 搜索框 -->
-  <div class="search-container">
-    <input type="text" id="searchInput" class="search-input" placeholder="搜索植物 (中文/英文名)">
-		<span class="search-icon" id="searchIcon" ><i class="fas fa-search"></i></span>
-  </div>
-
+	<div class="func-container">
+    <div class="search-container">
+      <input type="text" id="searchInput" class="search-input" placeholder="过滤植物 (中文/英文名)">
+			<span class="search-icon" id="searchIcon" ><i class="fas fa-search"></i></span>
+    </div>
+		<div class="search-container">
+      <input type="text" id="plantSearchInput" placeholder="添加植物 (中文/英文名)">
+      <span class="search-icon" id="plantSearchIcon" ><i class="fas fa-plus"></i></span>
+    </div>
+	</div>
   <div class="card-container" id="plant-cards">
     <!-- 卡片将在这里动态生成 -->
     <!-- 新增卡片将在此处 -->
@@ -498,13 +536,8 @@ const html = `
     <div class="modal-content">
       <span class="close">×</span>
       <h3>新增植物</h3>
-      <div class="search-container">
-        <input type="text" id="plantSearchInput" placeholder="搜索植物 (中文/英文名)">
-        <span class="search-icon" id="plantSearchIcon" ><i class="fas fa-search"></i></span>
-      </div>
-			<!-- Loading 覆盖层 -->
-      <div class="loading" id="plantLoading" style="display: none;">
-          <i class="fa-solid fa-spinner fa-spin-pulse"></i>
+			<div class="loading" id="plantLoading" style="display: none;">
+        <i class="fa-solid fa-spinner fa-spin-pulse"></i>
       </div>
       <div id="plantInfo" class="plant-info" style="display: none;">
         <!--  编辑字段的输入框 -->
@@ -523,8 +556,8 @@ const html = `
           </div>
           <div class="item">
             <div class="label-input-group">
-              <label for="family_genus">科属</label>
-              <input type="text" id="family_genus" name="family_genus" value="">
+              <label for="genus">科属</label>
+              <input type="text" id="genus" name="genus" value="">
             </div>
           </div>
           <div class="item">
@@ -555,8 +588,8 @@ const html = `
           </div>
           <div class="item">
             <div class="label-input-group">
-              <label for="flowering_period">花期</label>
-              <input type="text" id="flowering_period" name="flowering_period" value="">
+              <label for="period">花期</label>
+              <input type="text" id="period" name="period" value="">
             </div>
           </div>
 				</div>
@@ -623,7 +656,9 @@ const html = `
         });
 
         // 添加新增卡片
-        cardContainer.appendChild(createAddCard());
+        // cardContainer.appendChild(createAddCard());
+
+				layoutPlantCards();  // 更新布局
 
       } catch (error) {
         console.error('Fetch error:', error);
@@ -663,6 +698,7 @@ const html = `
         const newPlant = await response.json(); //  获取新添加的植物
 				console.log(newPlant); //  打印新添加的植物
 				appendPlantCard(createPlantCard(newPlant)); //  添加新植物卡片
+				layoutPlantCards();  // 更新布局
         // renderPlantCards(plants); //  重新渲染卡片
         closeAddPlantModal(); //  关闭弹窗
       } catch (error) {
@@ -686,10 +722,10 @@ const html = `
 				for (let i = cardContainer.children.length - 1; i >= 0; i--) {  // 从后往前遍历，避免索引问题
           const child = cardContainer.children[i];
 
-          // 检查是否有 data-name 属性，并且属性值为 "ling"
           if (cardContainer.children[i].dataset && (cardContainer.children[i].dataset.cnname === name || cardContainer.children[i].dataset.enname === name)) {
             // 删除该子元素
             cardContainer.removeChild(cardContainer.children[i]);
+						layoutPlantCards();  // 更新布局
           }
         }
       } catch (error) {
@@ -757,17 +793,17 @@ const html = `
             <div class="card-content">
                 <div class="card-title" onclick="window.open('${plant.link}', '_blank')">${plant.cnname} (${plant.enname})</div>
                 <div class="card-summary">
-                    <div class="icon-container" data-tooltip="${plant.category}">${getCategoryIcon(plant.category)}</div>
+                    <div class="icon-container icon-left" data-tooltip="${plant.category}">${getCategoryIcon(plant.category)}</div>
                     <div>${plant.size}</div>
-										<div class="icon-container" data-tooltip="${plant.light}">${getLightIcon(plant.ilight)}</div>
+										<div class="icon-container icon-right" data-tooltip="${plant.light}">${getLightIcon(plant.ilight)}</div>
                     <div>${plant.temperature}</div>
-                    <div class="icon-container" data-tooltip="${plant.toxicity}">${getToxicityIcon(plant.itoxicity)}</div>
+                    <div class="icon-container icon-right" data-tooltip="${plant.toxicity}">${getToxicityIcon(plant.itoxicity)}</div>
                 </div>
                 <div class="markdown-quote">${plant.notes}</div>
-                <div class="card-property"><span class="card-property-label">科属</span> ${plant.family_genus}</div>
+                <div class="card-property"><span class="card-property-label">科属</span> ${plant.genus}</div>
                 <div class="card-property"><span class="card-property-label">习性</span> ${plant.habit}</div>
                 <div class="card-property"><span class="card-property-label">分布</span> ${plant.distribution}</div>
-                <div class="card-property"><span class="card-property-label">花期</span> ${plant.flowering_period}</div>
+                <div class="card-property"><span class="card-property-label">花期</span> ${plant.period}</div>
                 <div class="card-property"><span class="card-property-label">光照</span> ${plant.light}</div>
                 <div class="card-property"><span class="card-property-label">浇水</span> ${plant.watering}</div>
                 <div class="card-property"><span class="card-property-label">施肥</span> ${plant.fertilization}</div>
@@ -794,10 +830,10 @@ const html = `
     // 创建新增卡片
     function createAddCard() {
       const addCard = document.createElement('div');
+			addCard.classList.add('card');
       addCard.classList.add('add-card');
       addCard.innerHTML = '<i class="fas fa-plus"></i>';
       addCard.addEventListener('click', () => {
-        //alert('点击新增植物');  // 替换为你的新增植物逻辑
 				openAddPlantModal();
       });
       return addCard;
@@ -805,12 +841,12 @@ const html = `
 
 		function appendPlantCard(card) {
 			const cardContainer = document.getElementById('plant-cards');
-			if (cardContainer && cardContainer.lastElementChild && cardContainer.lastElementChild.classList && cardContainer.lastElementChild.classList.contains('add-card')) {
-				cardContainer.removeChild(cardContainer.lastElementChild);
-			}
+			// if (cardContainer && cardContainer.lastElementChild && cardContainer.lastElementChild.classList && cardContainer.lastElementChild.classList.contains('add-card')) {
+			// 	cardContainer.removeChild(cardContainer.lastElementChild);
+			// }
 			cardContainer.appendChild(card);
 
-			cardContainer.appendChild(createAddCard());
+			// cardContainer.appendChild(createAddCard());
 		}
 
     //  创建所有卡片的函数，并初始化
@@ -822,7 +858,7 @@ const html = `
       });
 
       // 添加新增卡片
-      cardContainer.appendChild(createAddCard());
+      // cardContainer.appendChild(createAddCard());
     }
 
     // 过滤函数
@@ -839,10 +875,67 @@ const html = `
 					cardContainer.children[i].style.display = 'none';
 				}
       }
+			
+			layoutPlantCards();  // 更新布局
     }
 
-    // 初始化加载所有卡片
-		loadPlants();
+    let resizeTimer; // 用于 resize 事件的防抖
+
+    // --- 核心布局函数 ---
+    function layoutPlantCards() {
+				const container = document.getElementById('plant-cards');
+
+        const cardWidth = 300; // 与 CSS 中的 .card width 一致
+        const gap = 15;        // 卡片间隙
+        const cards = Array.from(container.querySelectorAll(".card"));
+        if (cards.length === 0) return;
+
+        // 1. 计算列数
+        const containerWidth = container.offsetWidth;
+        const numColumns = Math.max(1, Math.floor((containerWidth + gap) / (cardWidth + gap)));
+
+        // 计算居中偏移量
+        const contentWidth = numColumns * cardWidth + (numColumns - 1) * gap;
+        const offsetX = Math.max(0, Math.floor((containerWidth - contentWidth) / 2));
+
+        // 2. 初始化列高数组
+        const columnHeights = new Array(numColumns).fill(0);
+
+        // 3. 遍历并定位卡片
+        cards.forEach(card => {
+            // a. 找到最短的列
+            let minHeight = Infinity;
+            let minIndex = 0;
+            for (let i = 0; i < numColumns; i++) {
+                if (columnHeights[i] < minHeight) {
+                    minHeight = columnHeights[i];
+                    minIndex = i;
+                }
+            }
+
+            // b. 设置卡片位置
+            card.style.position = 'absolute';
+            card.style.top = minHeight + "px";
+            card.style.left = (offsetX + minIndex * (cardWidth + gap)) + "px";
+
+            // c. 更新该列的高度 (使用 offsetHeight 获取卡片总高度，包括固定图片和动态文本)
+            columnHeights[minIndex] += card.offsetHeight + gap;
+        });
+
+        // 4. 设置容器高度
+        const maxHeight = Math.max(...columnHeights);
+        container.style.height = Math.max(0, maxHeight - gap) + "px";
+    }
+
+    // --- 事件监听 ---
+		// 窗口大小改变时重新布局 (使用防抖)
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            // console.log("Window resized, recalculating layout."); // 可以取消注释来调试
+            layoutPlantCards();
+        }, 250); // 延迟执行
+    });
 
     // 添加搜索框的事件监听器
     document.getElementById('searchInput').addEventListener('input', handlePlantFilter);
@@ -854,8 +947,10 @@ const html = `
       }
     });
 
+		// 初始化加载所有卡片
+		loadPlants();
+
 		//  弹窗相关代码
-    //  弹窗相关代码
     const addPlantModal = document.getElementById('addPlantModal');
     const closeButton = document.querySelector('.close');
     const plantSearchInput = document.getElementById('plantSearchInput');
@@ -867,13 +962,13 @@ const html = `
     //  获取所有的输入框，用于编辑植物信息
     const cnnameInput = document.getElementById('cnname');
     const ennameInput = document.getElementById('enname');
-    const familyGenusInput = document.getElementById('family_genus');
+    const genusInput = document.getElementById('genus');
     const categoryInput = document.getElementById('category');
     const habitInput = document.getElementById('habit');
     const distributionInput = document.getElementById('distribution');
     const sizeInput = document.getElementById('size');
     const toxicityInput = document.getElementById('toxicity');
-    const floweringPeriodInput = document.getElementById('flowering_period');
+    const periodInput = document.getElementById('period');
     const lightInput = document.getElementById('light');
     const temperatureInput = document.getElementById('temperature');
     const wateringInput = document.getElementById('watering');
@@ -898,13 +993,13 @@ const html = `
       //  清空输入框
       cnnameInput.value = '';
       ennameInput.value = '';
-      familyGenusInput.value = '';
+      genusInput.value = '';
       categoryInput.value = '';
       habitInput.value = '';
       distributionInput.value = '';
       sizeInput.value = '';
       toxicityInput.value = '';
-      floweringPeriodInput.value = '';
+      periodInput.value = '';
       lightInput.value = '';
       temperatureInput.value = '';
       wateringInput.value = '';
@@ -937,6 +1032,8 @@ const html = `
 
 		 //  搜索按钮的点击事件
     async function handlePlantSearch() {
+			openAddPlantModal();
+
 			plantLoadingDiv.innerHTML = '<i class="fa-solid fa-spinner fa-spin-pulse"></i>';
 			plantLoadingDiv.style.display = 'flex';
       const query = plantSearchInput.value.trim();
@@ -944,6 +1041,8 @@ const html = `
         loadingSpinnerSpan.innerHTML = '请输入植物名称!';
         return;
       }
+			
+			
       const plant = await searchPlant(query);
 			console.log(plant);
       if (!plant || plant.cnname === undefined || plant.cnname === "") {
@@ -954,13 +1053,13 @@ const html = `
 				//  清空之前的编辑字段
         cnnameInput.value = '';
         ennameInput.value = '';
-        familyGenusInput.value = '';
+        genusInput.value = '';
         categoryInput.value = '';
         habitInput.value = '';
         distributionInput.value = '';
         sizeInput.value = '';
         toxicityInput.value = '';
-        floweringPeriodInput.value = '';
+        periodInput.value = '';
         lightInput.value = '';
         temperatureInput.value = '';
         wateringInput.value = '';
@@ -976,13 +1075,13 @@ const html = `
 			//  将搜索到的信息填充到输入框中
       cnnameInput.value = plant.cnname;
       ennameInput.value = plant.enname;
-      familyGenusInput.value = plant.family_genus || '';
+      genusInput.value = plant.genus || '';
       categoryInput.value = plant.category || '';
       habitInput.value = plant.habit || '';
       distributionInput.value = plant.distribution || '';
       sizeInput.value = plant.size || '';
       toxicityInput.value = plant.toxicity || '';
-      floweringPeriodInput.value = plant.flowering_period || '';
+      periodInput.value = plant.period || '';
       lightInput.value = plant.light || '';
       temperatureInput.value = plant.temperature || '';
       wateringInput.value = plant.watering || '';
@@ -1038,13 +1137,13 @@ const html = `
       const newPlant = {
         cnname: cnnameInput.value,
         enname: ennameInput.value,
-        family_genus: familyGenusInput.value,
+        genus: genusInput.value,
         category: categoryInput.value,
         habit: habitInput.value,
         distribution: distributionInput.value,
         size: sizeInput.value,
         toxicity: toxicityInput.value,
-        flowering_period: floweringPeriodInput.value,
+        period: periodInput.value,
         light: lightInput.value,
         temperature: temperatureInput.value,
         watering: wateringInput.value,
@@ -1064,32 +1163,75 @@ const html = `
 `
 
 type Plant struct {
-	Cnname          string   `json:"cnname"`
-	Enname          string   `json:"enname"`
-	FamilyGenus     string   `json:"family_genus"`
-	Category        string   `json:"category"`
-	Icategory       string   `json:"icategory"`
-	Habit           string   `json:"habit"`
-	Distribution    string   `json:"distribution"`
-	Size            string   `json:"size"`
-	Toxicity        string   `json:"toxicity"`
-	Itoxicity       string   `json:"itoxicity"`
-	FloweringPeriod string   `json:"flowering_period"`
-	Light           string   `json:"light"`
-	Ilight          string   `json:"ilight"`
-	Temperature     string   `json:"temperature"`
-	Watering        string   `json:"watering"`
-	Fertilization   string   `json:"fertilization"`
-	Notes           string   `json:"notes"`
-	Link            string   `json:"link"`
-	Image           string   `json:"image"`
-	Images          []string `json:"images"`
+	Cnname        string   `json:"cnname"`
+	Enname        string   `json:"enname"`
+	Genus         string   `json:"genus"`
+	Category      string   `json:"category"`
+	Icategory     string   `json:"icategory"`
+	Habit         string   `json:"habit"`
+	Distribution  string   `json:"distribution"`
+	Size          string   `json:"size"`
+	Toxicity      string   `json:"toxicity"`
+	Itoxicity     string   `json:"itoxicity"`
+	Period        string   `json:"period"`
+	Light         string   `json:"light"`
+	Ilight        string   `json:"ilight"`
+	Temperature   string   `json:"temperature"`
+	Watering      string   `json:"watering"`
+	Fertilization string   `json:"fertilization"`
+	Notes         string   `json:"notes"`
+	Link          string   `json:"link"`
+	Image         string   `json:"image"`
+	Images        []string `json:"images,omitempty"`
 }
 
 var plants = []*Plant{}
 
-func init() {
-	// 1. 打开文件
+var urlstr = ""
+var model = ""
+var apikey = ""
+
+// urlstr: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+// apikey: "AIzaSyAVi5soZI--MAKHhWGnk-Z3nctSxlqyEt4"
+// model: "gemini-2.0-flash-lite"
+// proxystr: "http://127.0.0.1:7897"
+
+func initialize(args []string) {
+	var llm string
+
+	if len(args) > 0 {
+		creds := strings.Split(args[0], ":")
+		if len(creds) == 1 {
+			llm = strings.TrimSpace(strings.ToLower(os.Getenv("LLM")))
+			apikey = strings.TrimSpace(creds[0])
+		} else {
+			llm = strings.TrimSpace(strings.ToLower(creds[0]))
+			apikey = strings.TrimSpace(creds[1])
+		}
+	}
+
+	switch llm {
+	case "gemini":
+		urlstr = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+		model = "gemini-2.0-flash-lite"
+	case "glm":
+		urlstr = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+		model = "glm-4-flash"
+	default:
+		urlstr = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+		model = "glm-4-flash"
+	}
+
+	if val, ok := os.LookupEnv("LLM_URL"); ok {
+		urlstr = val
+	}
+	if val, ok := os.LookupEnv("LLM_MODEL"); ok {
+		model = val
+	}
+	if val, ok := os.LookupEnv("LLM_APIKEY"); ok {
+		apikey = val
+	}
+
 	file, err := os.Open("plants.json")
 	if err != nil {
 		log.Println("failed to open file:", err)
@@ -1145,8 +1287,10 @@ func htmlbyhttp(urlstr string) (string, error) {
 
 func htmlbychromedp(urlstr string, selector string) (string, error) {
 	options := []chromedp.ExecAllocatorOption{
+		chromedp.NoDefaultBrowserCheck,
 		chromedp.Flag("headless", true), // debug使用
 		chromedp.Flag("blink-settings", "imagesEnabled=true"),
+		chromedp.Flag("ignore-certificate-errors", true),
 		chromedp.UserAgent(`Mozilla/5.0 (Windows NT 6.3; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.103 Safari/537.36`),
 	}
 	options = append(chromedp.DefaultExecAllocatorOptions[:], options...)
@@ -1173,6 +1317,10 @@ func htmlbychromedp(urlstr string, selector string) (string, error) {
 }
 
 func fetchImages(platform, selector, name string) []string {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stdout)
+	log.Printf("fetching %s plant images with %s %s\n", name, platform, selector)
+
 	var images []string
 
 	switch platform {
@@ -1242,6 +1390,7 @@ func fetchImages(platform, selector, name string) []string {
 
 func fetchInfo(name string) []*Plant {
 	var pls []*Plant
+
 	cont, err := reqAI(name)
 	if err != nil {
 		log.Println("request ai error:", err)
@@ -1258,12 +1407,13 @@ func fetchInfo(name string) []*Plant {
 		}
 
 		pls = append(pls, pl)
-		for _, p := range pls {
-			fmt.Println(p)
-		}
+		// for _, p := range pls {
+		// 	fmt.Println(p)
+		// }
 	}
 
 	for _, plant := range pls {
+		plant.Category = strings.ReplaceAll(plant.Category, " ", "")
 		plant.Images = fetchImages("baidu", "div#waterfall img", plant.Cnname)
 	}
 
@@ -1271,12 +1421,13 @@ func fetchInfo(name string) []*Plant {
 }
 
 func reqAI(question string) (string, error) {
+	log.Printf("retrieving %s plant information with llm %s %s\n", question, urlstr, model)
+
 	// 构建请求体
-	apiKey := "AIzaSyAVi5soZI--MAKHhWGnk-Z3nctSxlqyEt4"
 	requestBody := map[string]interface{}{
-		"model": "gemini-2.0-flash-lite", //  根据你的需求选择模型
+		"model": model, //  根据你的需求选择模型
 		"messages": []map[string]string{
-			{"role": "system", "content": "你是一个资深植物专家, 我会问你几种植物, 每种植物以空格间隔, 你需要用简短的文字回答各个植物的中文(cnname), 英文(enname), 科属(family_genus), 类别(category), 习性(habit), 分布(distribution), 尺寸(size), 毒性(toxicity), 花期(flowering_period), 光照(light), 温度(temperature), 浇水(watering), 施肥(fertilization), 简介(notes), 百科(link). 回答输出的格式为json数组(数组中每一项均为单层json对象). 其中科属的格式为xx科xx属, 尺寸的格式为xx-xxcm, 温度的格式为xx-xx°C, 习性为生态喜好和忌讳, 花期明确月份, 浇水和施肥明确周期, 光照明确喜光度, 百科为其中文维基百科的链接, 类别为草本木本分类(草本明确几年生, 木本明确是乔木灌木还是藤木)"},
+			{"role": "system", "content": "你是一个资深植物专家, 我会问你几种植物, 每种植物以空格间隔, 你需要用简短的文字回答各个植物的中文(cnname), 英文(enname), 科属(genus), 类别(category), 习性(habit), 分布(distribution), 尺寸(size), 毒性(toxicity), 花期(period), 光照(light), 温度(temperature), 浇水(watering), 施肥(fertilization), 简介(notes), 百科(link). 其中英文为英文学名,科属的格式为xx科xx属, 尺寸的格式为xx-xxcm, 温度的格式为xx-xx°C, 习性为生态喜好和忌讳, 花期明确月份, 浇水和施肥明确周期, 光照明确喜光度, 简介为此植物的特色内涵用途等, 百科为其中文维基百科的链接, 类别为草本木本分类(草本明确几年生, 木本明确是乔木灌木还是藤木). 回答只输出json数组, 不要输出其他文字, 示例为:[{\"cnname\":\"\",\"enname\":\"\",\"genus\":\"\",\"category\":\"\",\"habit\":\"\",\"distribution\":\"\",\"size\":\"\",\"toxicity\":\"\",\"period\":\"\",\"light\":\"\",\"temperature\":\"\",\"watering\":\"\",\"fertilization\":\"\",\"notes\":\"\",\"link\":\"\"}]"},
 			{"role": "user", "content": question},
 		},
 	}
@@ -1288,28 +1439,28 @@ func reqAI(question string) (string, error) {
 	}
 
 	// 创建 HTTP 请求
-	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequest("POST", urlstr, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// 设置请求头
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	proxyURLStr := os.Getenv("HTTP_PROXY") // 或者使用 HTTPS_PROXY，取决于你的代理设置
-	if proxyURLStr == "" {
-		proxyURLStr = "http://127.0.0.1:7897"
-	}
-
-	proxyURL, _ := url.Parse(proxyURLStr)
+	req.Header.Set("Authorization", "Bearer "+apikey)
 
 	// 发送 HTTP 请求
 	client := &http.Client{
+		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+			Proxy: http.ProxyFromEnvironment,
 		},
 	}
+
+	//fmt.Println(http2curl(req))
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to make request: %w", err)
@@ -1339,9 +1490,15 @@ func reqAI(question string) (string, error) {
 		if choice, ok := choices[0].(map[string]interface{}); ok {
 			if message, ok := choice["message"].(map[string]interface{}); ok {
 				if content, ok := message["content"].(string); ok {
-					content = strings.TrimPrefix(strings.TrimSpace(content), "```json")
-					content = strings.TrimSuffix(strings.TrimSpace(content), "```")
-					return strings.TrimSpace(content), nil
+					re := regexp.MustCompile("(?s)```[a-zA-Z]*\n(.*?)\n```")
+					matches := re.FindStringSubmatch(content)
+					if len(matches) > 1 {
+						return strings.TrimSpace(matches[1]), nil
+					} else {
+						content = strings.TrimPrefix(strings.TrimSpace(content), "```json")
+						content = strings.TrimSuffix(strings.TrimSpace(content), "```")
+						return strings.TrimSpace(content), nil
+					}
 				}
 			}
 		}
@@ -1410,6 +1567,8 @@ func find(w http.ResponseWriter, r *http.Request) {
 
 	plant := pls[0]
 
+	log.Printf("found plant %v with name %s\n", *plant, pname)
+
 	if err := json.NewEncoder(w).Encode(plant); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1471,7 +1630,8 @@ func add(w http.ResponseWriter, r *http.Request) {
 		plant.Ilight = "半日照"
 	}
 
-	fmt.Println(plant)
+	log.Printf("adding plant %v with name %s\n", plant, plant.Cnname)
+
 	plants = append(plants, &plant)
 	if err := flush(); err != nil {
 		http.Error(w, fmt.Sprintf("flushing file error: %v", err), http.StatusInternalServerError)
@@ -1531,7 +1691,9 @@ func healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func flush() error {
-	data, err := json.Marshal(plants)
+	log.Println("flushing plants to file")
+
+	data, err := json.MarshalIndent(plants, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1542,7 +1704,6 @@ func flush() error {
 	}
 	defer file.Close()
 
-	// 3. 将 JSON 数据写入文件
 	_, err = file.Write(data)
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
@@ -1551,13 +1712,73 @@ func flush() error {
 	return nil
 }
 
+func bashEscape(str string) string {
+	return `'` + strings.Replace(str, `'`, `'\''`, -1) + `'`
+}
+
+func http2curl(req *http.Request) (string, error) {
+	var command []string
+	if req.URL == nil {
+		return "", fmt.Errorf("getCurlCommand: invalid request, req.URL is nil")
+	}
+
+	command = append(command, "curl")
+
+	schema := req.URL.Scheme
+	requestURL := req.URL.String()
+	if schema == "" {
+		schema = "http"
+		if req.TLS != nil {
+			schema = "https"
+		}
+		requestURL = schema + "://" + req.Host + req.URL.Path
+	}
+
+	if schema == "https" {
+		command = append(command, "-k")
+	}
+
+	command = append(command, "-X", bashEscape(req.Method))
+
+	if req.Body != nil {
+		var buff bytes.Buffer
+		_, err := buff.ReadFrom(req.Body)
+		if err != nil {
+			return "", fmt.Errorf("getCurlCommand: buffer read from body error: %w", err)
+		}
+		// reset body for potential re-reads
+		req.Body = io.NopCloser(bytes.NewBuffer(buff.Bytes()))
+		if len(buff.String()) > 0 {
+			bodyEscaped := bashEscape(buff.String())
+			command = append(command, "-d", bodyEscaped)
+		}
+	}
+
+	var keys []string
+
+	for k := range req.Header {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		command = append(command, "-H", bashEscape(fmt.Sprintf("%s: %s", k, strings.Join(req.Header[k], " "))))
+	}
+
+	command = append(command, bashEscape(requestURL))
+
+	command = append(command, "--compressed")
+
+	return strings.Join(command, " "), nil
+}
+
 func main() {
-	// var dport = flag.String("port", "2333", "server port")
-	// var dpath = flag.String("dir", "./", "server path")
 	flag.StringVar(&port, "p", "2333", "server port")
 	flag.StringVar(&port, "port", "2333", "server port")
 
 	flag.Parse()
+
+	initialize(flag.Args())
 
 	http.HandleFunc("/", index)
 	http.HandleFunc("/healthz", healthz)
